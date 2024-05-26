@@ -1,5 +1,6 @@
 import time
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 import json
 import requests
@@ -386,38 +387,44 @@ def get_with_retry(url, max_retries=3, retry_delay=2):
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=None, intents=intents)
 
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user.name}')
     await load_player_data()
+    try:
+        synced = await bot.tree.sync()
+        print(f"Synced {len(synced)} command(s)")
+    except Exception as e:
+        print(e)
     update_checker.start()
 
-@bot.command()
-async def register(ctx, riot_id: str, user: discord.Member = None):
+
+@bot.tree.command(name="register", description="Register a League of Legends account.")
+async def register(interaction: discord.Interaction, riot_id: str, user: discord.Member = None):
     if not user:
-        user = ctx.author
+        user = interaction.user
 
     if REQUIRED_ROLE_ID:
-        role = discord.utils.get(ctx.guild.roles, id=REQUIRED_ROLE_ID)
+        role = discord.utils.get(interaction.guild.roles, id=REQUIRED_ROLE_ID)
         if role not in user.roles:
-            await ctx.send(f"{user.mention}, you need the '{role.name}' role to register.")
+            await interaction.response.send_message(f"{user.mention}, you need the '{role.name}' role to register.")
             return
 
     # --- Check if Riot ID is already registered ---
     if user.id in player_data and riot_id in player_data[user.id]:
-        await ctx.send(f"{user.mention}, you are already registered with Riot ID: {riot_id}")
+        await interaction.response.send_message(f"{user.mention}, you are already registered with Riot ID: {riot_id}")
         return
     
     puuid = await get_puuid(riot_id)
     if not puuid:
-        await ctx.send(f"{user.mention}, invalid Riot ID format or account not found.")
+        await interaction.response.send_message(f"{user.mention}, invalid Riot ID format or account not found.")
         return
 
     summoner_id = await get_summoner_id(puuid)
     if not summoner_id:
-        await ctx.send(f"{user.mention}, error fetching summoner ID.")
+        await interaction.response.send_message(f"{user.mention}, error fetching summoner ID.")
         return
    
     league_entries = await get_league_entries(summoner_id)
@@ -445,12 +452,12 @@ async def register(ctx, riot_id: str, user: discord.Member = None):
         await update_streaks(user.id, riot_id, last_match_id)
 
     await save_player_data()
-    await ctx.send(f"{user.mention}, you have been registered with Riot ID: {riot_id}")
+    await interaction.response.send_message(f"{user.mention}, you have been registered with Riot ID: {riot_id}")
 
-@bot.command()
-async def unregister(ctx, riot_id: str, user: discord.Member = None):
+@bot.tree.command(name="unregister", description="Unregister a League of Legends account.")
+async def unregister(interaction: discord.Interaction, riot_id: str, user: discord.Member = None):
     if not user:
-        user = ctx.author
+        user = interaction.user
 
     user_id = user.id
     if user_id in player_data and riot_id in player_data[user_id]:
@@ -459,12 +466,12 @@ async def unregister(ctx, riot_id: str, user: discord.Member = None):
         if not player_data[user_id]:
             del player_data[user_id]
         await save_player_data()
-        await ctx.send(f"{user.mention}, you have been unregistered from Riot ID: {riot_id}")
+        await interaction.response.send_message(f"{user.mention}, you have been unregistered from Riot ID: {riot_id}")
     else:
-        await ctx.send(f"{user.mention}, you are not registered with Riot ID: {riot_id}")
+        await interaction.response.send_message(f"{user.mention}, you are not registered with Riot ID: {riot_id}")
 
-@bot.command()
-async def mastery(ctx, user: discord.Member, champion_name: str):
+@bot.tree.command(name="mastery", description="Display champion mastery levels for a user.")
+async def mastery(interaction: discord.Interaction, user: discord.Member, champion_name: str):
     user_id = user.id  # No need to convert to string
     if user_id in player_data:
         riot_ids = player_data[user_id].keys()
@@ -472,7 +479,7 @@ async def mastery(ctx, user: discord.Member, champion_name: str):
         champion_id = await get_champion_id(champion_name)
 
         if champion_id is None:  # Handle invalid champion name
-            await ctx.send(f"Invalid champion name: {champion_name}")
+            await interaction.response.send_message(f"Invalid champion name: {champion_name}")
             return
 
         mastery_info = []
@@ -495,73 +502,26 @@ async def mastery(ctx, user: discord.Member, champion_name: str):
                 if e.response.status_code == 404:
                     mastery_info.append(f"{riot_id} ({region}): Not found")
                 else:
-                    await ctx.send(f"Error fetching mastery for {riot_id}: {e}")
+                    await interaction.response.send_message(f"Error fetching mastery for {riot_id}: {e}")
                     return  # Early return on unexpected errors
 
         if mastery_info:
-            await ctx.send("\n".join(mastery_info))
+            await interaction.response.send_message("\n".join(mastery_info))
         else:
-            await ctx.send(f"No mastery information found for {champion_name}.")
+            await interaction.response.send_message(f"No mastery information found for {champion_name}.")
     else:
-        await ctx.send(f"User {user.mention} is not registered with the bot.")
+        await interaction.response.send_message(f"User {user.mention} is not registered with the bot.")
 
-@bot.command()
-async def build(ctx, champion_name: str):
-    """Provides a link to U.GG builds for the specified champion.
-
-    Usage: !build championName
-    """
-
+@bot.tree.command(name="build", description="Get a link to U.GG builds for a champion.")
+async def build(interaction: discord.Interaction, champion_name: str):
     champion_name = champion_name.lower()
     url = f"https://u.gg/lol/champions/{champion_name}/build?rank=diamond_plus"
-    await ctx.send(f"Here's the build for {champion_name.capitalize()} on U.GG: {url}")
+    await interaction.response.send_message(f"Here's the build for {champion_name.capitalize()} on U.GG: {url}")
 
-@bot.command()
-@commands.is_owner()
-async def update_player_data(ctx):
-    try:
-        for user_id, riot_id_data in player_data.items():
-            for riot_id, data in riot_id_data.items():
-                if "last_queue_type" not in data:  # Check if field exists
-                    last_match_id = data.get("last_match_id")
-                    if last_match_id:
-                        # Fetch match details and extract queue type
-                        region = API_REGIONS["match"]
-                        match_url = f"https://{region}.api.riotgames.com/lol/match/v5/matches/{last_match_id}?api_key={api_key}"
-                        match_response = requests.get(match_url)
-                        if match_response.status_code == 200:
-                            match_data = match_response.json()
-                            queue_id = match_data["info"]["queueId"]
-
-                            # Map Queue ID to Streak Type
-                            streak_type = {
-                                400: "quickplay/draftpick",
-                                430: "quickplay/draftpick",
-                                420: "ranked_solo_duo",
-                                440: "ranked_flex",
-                                450: "aram",
-                                1400: "arena",
-                                # ... (Add more as needed)
-                            }.get(queue_id)
-                            data["last_queue_type"] = streak_type  # Update the data
-                        else:
-                            print(f"Error fetching match details: {match_response.status_code} - {match_response.text}")
-                    else:
-                        data["last_queue_type"] = None
-                else:
-                    #if last_queue_type is allready there, do nothing
-                    pass
-                    
-        await save_player_data()
-        await ctx.send("Player data has been updated.")
-
-    except Exception as e:
-        await ctx.send(f"An error occurred while updating player data: {e}")
-
-@bot.command()
-async def rank(ctx, user: discord.Member = None):
+@bot.tree.command(name="rank", description="Display rank information for a user.")
+async def rank(interaction: discord.Interaction, user: discord.Member = None):
     if not user:
-        user = ctx.author
+        user = interaction.user
 
     user_id = user.id
 
@@ -576,14 +536,13 @@ async def rank(ctx, user: discord.Member = None):
                     )
 
         if ranks_info:
-            await ctx.send(f"Ranks for {user.mention}:\n" + "\n".join(ranks_info))
+            await interaction.response.send_message(f"Ranks for {user.mention}:\n" + "\n".join(ranks_info))
         else:
-            await ctx.send(f"No rank information found for {user.mention}.")
+            await interaction.response.send_message(f"No rank information found for {user.mention}.")
     else:
-        await ctx.send(f"User {user.mention} is not registered with the bot.")
+        await interaction.response.send_message(f"User {user.mention} is not registered with the bot.")
 
-# Task to Check Updates Regularly
-@tasks.loop(minutes=1)  # Adjust interval as needed
+@tasks.loop(minutes=1) 
 async def update_checker():
     try:
         await check_for_updates()
